@@ -1,0 +1,274 @@
+---
+title: "HW-Week6"
+author: "Zhuoyang Chen"
+date: "February 14, 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Exercises
+####1. Write a script that will:
+#####1). run BWA on one of the samples from Gierlinski dataset
+#####2). run STAR on the same sample.
+#####Is it a BAM file?
+#####Is it sorted?
+#####Is it indexed?
+
+Choose the first technical replicate for WT1 as sample here.  
+
+1. Index  
+Download binary compressed reference genome **sacCer3.2bit** of sacCer3 from UCSC genome browser. Noticed that the format was not **FASTA**, refering to the documentation on UCSC website, it should be converted to FASTA format by a tool called **twoBitToFa**. Download **SacCer3.sgd.gtf** from UCSC table browser. Here I didn't do these, since **sacCer3.fa** and **sacCer3.sgd.gtf** were already in Luce directory. I copied them into my folder for indexing in next step.  
+
+```{}
+mkdir Week6
+cd Week6
+mkdir SacCer3_BWAindex
+mkdir SacCer3_STARindex
+
+cp /home/luce/angsd/referenceGenomes/sacCer.fa ./
+cp /home/luce/angsd/referenceGenomes/sacCer.sgd.gtf ./
+
+spack load star@2.7.0e
+spack load bwa@0.7.15%gcc@6.3.0
+spack load samtools@1.9%gcc@6.3.0
+```
+
+For STAR, using command:  
+```{}
+STAR --runMode genomeGenerate \
+     --runThreadN 1 \
+     --genomeDir sacCer3_STARindex \
+     --genomeFastaFiles sacCer3.fa \
+     --sjdbGTFfile sacCer3.sgd.gtf \
+     --sjdbOverhang 99
+```
+The code is the same as in the documentation in the class, except that here the number of threads used changing from 1 to 8 in **runThreadN**.  
+
+For BWA, using command:  
+`bwa index -p sacCer3_BWAindex / sacCer3 sacCer3.fa`, the same as that in class.  
+
+2. Alignment  
+The memory I requested for the job was 8G via the command `srun -n1 --pty --partition=angsd_class --mem=8G bash -i`.
+
+For STAR, I used the command in the class to align the sample I chose ERR458493.  
+```{}
+mkdir alignments
+STAR --runMode alignReads \
+     --runThreadN 8 \
+     --genomeDir sacCer3_STARindex \
+     --readFilesIn ERR458493.fastq.gz \
+     --readFilesCommand zcat \
+     --outFileNamePrefix alignments/ERR458493. \
+     --outSAMtype BAM SortedByCoordinate
+```
+
+For BWA, I used the command in the class as well:  
+`bwa mem sacCer3_BWAindex/sacCer3 ERR458493.fastq.gz > alignments/ERR458493.bwa.sam`  
+
+Look carefully into the output files, we can see that the output file of STAR is a **.bam** file, while that of BWA is a **.sam** file.
+The bam file from STAR is sorted while the sam file from BWA was is not.
+
+Extra commands need to be used to convert **sam** file from BWA to **bam** file and sort them.  
+`cd alignments`  
+`samtools view -b ERR458493.bwa.sam | samtools sort -o ERR458493.bwa.sorted.bam`  
+
+Both the reference gonome need to be indexed before alignment.  
+
+####2. Subset the aligned reads to select only those that map to chromosome1.
+Inspected the **sam** file and found that the chromosome number which a read matched to was on the third columns and the corresponding nucleotide sequence (read) was on the 10th columns. So first selected the section that from the where the accession number **ERR458493** first occurs to the end of the file, and store these information into file **seq_extract**. Then selected those whose third field was 'chrI', extracted their corresponding sequences on 10th field and stored them into another file **chr1_aligned**. Noticed that a read may have different alignments, here I kept all the possible aligned forms for a specific read.  
+
+```{}
+egrep 'ERR458493\.[0-9]' ERR458493.bwa.sam > seq_extract
+egrep 'chrI[[:sapce:]]+' seq_extract | cut -f 10 > chr1_aligned
+```
+
+Also instead of extracting the reads, use `samtools view` without option **-h** and automatically remove the header section.
+
+Used `tail -n 1 seq_extract` to see the last aligned read, fould that was No.1093957 read. Used `wc -l seq_extract` to see the total number of aligned reads, found it was 1093975, which means there are multi-alignments of reads.
+
+####3. Compare the output from BWA and STAR, and summarize any results or differences. 
+Before converting the sam file to bam file, the reads are sorted by the number of read with ascent order, after being bam file, the order changed, and an additional line **@HD** was added, the rest stayed the same.
+
+Between the two files, the optional SAM fields are different. Besides, the @HD lines are different, where it is VN:1.6 for STAR while VN:1.4 for BWA. Also the @PG lines are different since they are using different commands.
+
+#####1). Which optional SAM fields does STAR add and what do they represent?
+Used samtools view to see the content of bam file from STAR and found that it has **NH**, **HI**, **AS** and **nM**.
+NH: Number of reported alignments for the query sequence.
+HI: Query is i-th hit stored in the file.
+AS: Alignment score.
+nM: the number of mismatches per alignment.
+
+#####2). Which optional SAM fields does BWA add and what do they represent?
+Use `head -n 25 ERR458493.bwa.sorted.bam` to see the content of bam file from BWA and found that it has **NM**, **MD**, **AS**, **XS** and **XA**.
+NM: Edit distance of the query to the reference.
+MD: String that contains the exact positions of mismatches.
+AS: Alignment score.
+XS: Suboptimal alignment score.
+XA: Alternative hits; format: (chr,pos,CIGAR,NM;).
+
+####4. Run bamqc on your BAM files
+#####1). Describe 3 differences between the bamqc results for both the BWA and the STAR output files
+Use `/softlib/apps/EL7/BamQC/bin/bamqc --help` to learn how to use bamqc. From the documentation, kwew that I can provide a prepared reference genome (the directory), a annotation file. To make the software faster, user can also specify the number of threads to use.  
+```{}
+export PATH=$PATH:/softlib/apps/EL7/BamQC/bin
+mkdir bamqc_results
+bamqc -o bamqc_results -f ../sacCer3.sgd.gtf \
+-g ../ -t 8 ERR458493.bwa.sorted.bam ERR458493.Aligned.sortedByCoord.out.bam
+```
+
+The report for BWA has more sections than that for STAR including "SNP Frequencies" and "SNP Frequencies by Type".
+
+#####**1. The Indel frequencies are different.** While the total tendencies are almost the same, I notice there is a peak at the first 5 bases in the figure of BWA.  
+
+![Figure1. Indel Frequencies of STAR](indel_star.png)  
+
+
+![Figure2. Indel Frequencies of STAR](indel_bwa.png)  
+  
+#####**2. The mapping quality distributions are different.** For STAR, there are peaks at the first 5-6 bases and a single narrow peak after 248, while for BWA, several peaks scatter among 1-59 and a single narrow peaks on 60.
+
+![Figure 3. Mapping quality distribution of STAR](mapQ_star.png)  
+
+
+![Figure 4. Mapping quality distribution of BWA](mapQ_bwa.png)  
+
+#####**3. There are SNP frequencies by type for BWA while not for STAR.**
+
+![Figure 5. SNP frequencies by type](SNP.png)
+
+####5. Explain the difference between alignment score and mapping quality in SAM/BAM files. How does the interpretation of the mapping quality field differ between STAR and BWA?
+Alignment score is a parameter that measures how similar a read is to the reference genome. The number of match and mismatch would effect the AS. While mapping score is about how confident that the reported alignment is.
+
+In STAR, the mapping score measures how unique a read mapped to the reference genome and a maximum of 255 means totally unique mapping. While in BWA the mapping score equals -10log10*P(mapping position is wrong), so the lower the better and a score of 255 means the mapping is poor.
+
+####6. What is the difference between a multi-mapping read and a split read? Find a read that has been split in STAR. How did BWA handle the mapping of that read?
+A multi-mapping read is a read that can completely or mostly mapped on different locus in the genome, while a split read is a read that parts of it mapped to different regions.
+
+In STAR, a split read could be found by first looking at the FLAG field that has a number of 256, which means the answewr to the question "Is the alignment not primary?" is yes. There are two cases that a read yields a 256 FLAG. One is the whole read can be mapped to multi regions with 51M and the other is part of the read can be mapped to a distant region with a large number before N, i.g. 5M10000N46M. So after finding the 256 Flag reads, we should screen the reads on their CIGARs to find out split reads.  
+
+`samtools view -h ERR458493.Aligned.sortedByCoord.out.bam | egrep '[[:space:]]256[[:space:]]' | head -n 5`  
+
+Also could be done by `samtools view -f 256 <bam_file>`  
+
+Output the first matched reads and found read **ERR458493.554542** has a CIGAR **44M56181N7M** and thus is a split read.
+
+Used command `egrep 'ERR458493\.554542' ERR458493.bwa.sam` to check the result of the same read from BWA.
+At the same time, used `samtools view -h ERR458493.Aligned.sortedByCoord.out.bam | egrep 'ERR458493\.554542'` to track back all records of the same read in STAR.
+
+I found that instead of outputing all the possible alignments of the same read as in STAR, where read 554542 has 5 records, the result from BWA just reports one result, but indicating all the alternative hits in the **XA** optional SAM field. And from BWA it seemed not be able to output the split information since it had **6S45M** in CIGAR.
+
+Also in STAR, it also found that the read can be mapped to chrVIII with 3 possible split alignments, while in BWA it didn't report these alternative from different chromosomes.
+
+####7. How can you remove the unmapped reads from the BWA output?
+If firstly we just consider the read itself is unmapped, then the number would be 8. This could be easily detected by using samtools.  
+`samtools view -G 8 ERR458493.bwa.sam > mapped.sam`  
+
+If consider is the mate read unmapped:  
+`samtools view -G 16 ERR458493.bwa.sam > mapped.sam`  
+
+##Project work
+####1. Download at leat one FASTQ file that you will be working with for your project. Document the following details:
+#### where did you get it from?
+I got an accession number from the paper. The number is indicated in the **Data Availability Statement** section on the left of the first page. The accession number is GSE128722 in GEO database.
+
+#### what publication is it linked to?
+**Differential regulation network-based quantification and prioritization of key genes underlying cancer drug resistence based on time-course RNA-Seq data**  
+https://doi.org/10.1371/journal.pcbi.1007435
+
+#### who generated the data?
+The RNA-Seq data is generated by Dr. Xingcheng Liu, who help culture cell, prepare the RNA library and get sequencing data. The name can be found on the NCBI RNA data website and also in the Ackwonledge section.
+
+#### how was the NA extracted?
+Beads containing oligo (dT) were used to isolate poly(A) mRNA from total RNA. Purified mRNA was then fragmented in fragmentation buffer. Using these short fragments as templates, random hexamer-primers ere used to synthesize the first-strand cDNA. The second-strand cDNA was synthesized using buffer, dNTPs, RNase H and DNA polymerase I. Short double-stranded cDNA fragments were purified with a QIAquick PCR extraction kit (vendor) and eluted with EB buffer for end repair and the addition of an 'A' base. 
+
+#### what library prep was used?
+RNA libraries were prepared for sequencing using standard Illumina protocols. The short fragments were ligated to Illumina sequencing adaptors. DNA fragments of a selected size were gel-purified and amplified by PCR. 
+
+#### what cell type was used?
+They are epithelial brain cancer glioma cells: LN-18, U87 and DBTRG-05MG.
+
+#### what was the treatment/experimental condition?
+The three cell lines are maintained at 37??? under 5% CO2 in RPMI1640, MEM or DMEM supplemented with 10% fetal bovine serum and penicillin/streptomycin. Then treat them with 1mM cAMP activator dbcAMP and data collected at 0, 12, 24, 36, 48h.
+
+##### what sequencing platform was used?
+The amplified library was sequenced using Illumina HiSeq 2000.
+
+####2. Align the FASTQ file with an appropriate aligner (you may have to build a new index). Document:
+##### parameters (and why you chose them)
+##### summary of outcome and basicQC
+**1. Reference genome and annotation for building index.**  
+When logging in buddy, 50G memory was required.
+**Homo_sapiens.GRCh38.dna.primary_assembly.fa** was downloaded from Ensembl. Annotation **Homo_sapiens.GRCh38.99.gtf** was downloaded from Ensembl, since annotation from Ensembl is the most detailed one.
+
+```{}
+STAR --runMode genomeGenerate \
+     --runThreadN 8 \
+     --genomeDir STARindex \
+     --genomeFastaFiles Homo_sapiens.GRCh38.dna.primary_assembly.fa \
+     --sjdbGTFfile Homo_sapiens.GRCh38.99.gtf \
+     --sjdbOverhang 99
+```
+
+Parameters:  
+**runThreadN 8**: use 8 threads to process building index, which is the maximum possible threads to individual to use.  
+**sjdbOverhang 99**: although the length of my reads is 90 base, but according to the manual, using 99 instead of (90-1=89) would work well too.  
+
+**2. Quality Control**    
+Use fastqc to check qualities of my first sample **SRR8769935.sra_1.fastq** and **SRR8769935.sra_2.fastq**, which are paired-end.
+
+`spack load fastqc`  
+`mkdir fastqc_results`  
+`fastqc -o fastqc_results --extract SRR8769935.sra_1.fastq SRR8769935.sra_2.fastq`  
+
+By inspecting the report, the quality of read_1 is good, while that of read_2 is relative lower.  
+
+![Figure 6. Per base quality of read 2](base_quality_2.png)
+
+
+![Figure 7. Duplication level of read 2](duplication_2.png)
+
+**3. Use trim_galore to trim adaptors and low quality reads**  
+`spack load -r trimgalore`  
+`trim_galore --illumina --stringency 9 SRR8769935.sra_1.fastq SRR8769935.sra_2.fastq`  
+
+Parameters:  
+**--illumina**: the RNA-Seq data is sequenced by illumina so it contains illumina adaptors.  
+**--stringency 9**: define the minimum overlap bases with adaptor to trim a read. The default would be 1, which would cause all the **A** at the end of reads would be trimmed. So I use a threshold of 70% of the adaptor, which is 13*70% = 9.1.  
+
+**4. Re-fastqc**  
+Do quality control again after trimming.  
+`fastqc -o fastqc_results --extract SRR8769935.sra_1_trimmed.fq SRR8769935.sra_2_.fastq_trimmed.fq`   
+
+![Figure 8. Per base quality of trimmed read 2](base_quality_2t.png)
+
+The quality of end of reads is better than that before trimming.
+
+**5. Alignment**  
+Align trimmed reads to the reference genome index.  
+```{}
+mkdir alignments  
+STAR --runMode alignReads \
+     --runThreadN 8 \
+     --genomeDir STARindex \
+     --readFilesIn SRR8769935.sra_1_trimmed.fq SRR8769935.sra_2_trimmed.fq \
+     --outFileNamePrefix alignments/SRR87869935. \
+     --outSAMtype BAM SortedByCoordinate
+```
+
+Parameters:  
+**readFilesIn**: input files that need to be mapped to the reference genome.  
+**outFileNamePrefix**: the prefix of output files.  
+**outSAMtype**: output file is in BAM format and sorted by coordinate.  
+
+The **Log** file of the output looks like  
+
+![Figure 9. Summary of alignment](alignment.png)
+
+
+
+
+
+
